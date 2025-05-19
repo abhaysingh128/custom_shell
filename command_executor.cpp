@@ -11,6 +11,7 @@
 #include <locale>
 #include <codecvt>
 #include <sstream>
+#include "shell.h"
 // Commented out shell.h since we're missing implementation for handle_alias_command
 // #include "shell.h" 
 using namespace std;
