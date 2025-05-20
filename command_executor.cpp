@@ -496,11 +496,28 @@ void execute_command(const vector<string>& args) {
         si.cb = sizeof(si);
         ZeroMemory(&pi, sizeof(pi));
         
-        string cmdLine = "cmd.exe /C " + fullCommand;
+        // Use CreateProcess directly for better control
+        string cmdLine = fullCommand;
         char* cmd = _strdup(cmdLine.c_str());
         
-        if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        BOOL success = CreateProcessA(
+            NULL,           // No module name (use command line)
+            cmd,            // Command line
+            NULL,           // Process handle not inheritable
+            NULL,           // Thread handle not inheritable
+            FALSE,          // Set handle inheritance to FALSE
+            CREATE_NEW_CONSOLE, // Create new console window
+            NULL,           // Use parent's environment block
+            NULL,           // Use parent's starting directory
+            &si,            // Pointer to STARTUPINFO structure
+            &pi             // Pointer to PROCESS_INFORMATION structure
+        );
+        
+        if (success) {
+            // Wait for the process to complete
             WaitForSingleObject(pi.hProcess, INFINITE);
+            
+            // Close process and thread handles
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         } else {
