@@ -12,8 +12,6 @@
 #include <codecvt>
 #include <sstream>
 #include "shell.h"
-// Commented out shell.h since we're missing implementation for handle_alias_command
-// #include "shell.h" 
 using namespace std;
 
 vector<string> command_history;
@@ -288,7 +286,8 @@ void print_help() {
          << "  clear      - Clear the screen\n"
          << "  history    - Show command history\n"
          << "  ls [dir]   - List directory contents (short format)\n"
-         << "  ll [dir]   - List directory contents (long format)\n"
+         << "  ll [dir]   - List directory contents (long format with details)\n"
+         << "  dir [dir]  - List directory contents (Windows style)\n"
          << "  mkdir <dir>- Create a directory\n"
          << "  touch <file>- Create/update a file\n"
          << "  rm <file>  - Delete a file\n"
@@ -299,279 +298,215 @@ void print_help() {
          << "  jobs       - List all background jobs\n"
          << "  fg <jobid> - Bring background job to foreground\n"
          << "  kill <jobid> - Kill a background job\n"
-         << "  run <cmd>  - Run a command in the background\n"
-         << "  ping <host>- Ping a host\n"
+         << "  alias [name='command'] - Create or list aliases\n"
          << "  exit       - Exit the shell\n"
+         << "\nSpecial Features:\n"
          << "  cmd1 | cmd2 - Pipe output of cmd1 to cmd2\n"
          << "  cmd > file - Redirect output to file\n"
-         << "  cmd < file - Take input from file\n";
+         << "  cmd < file - Take input from file\n"
+         << "  cmd &      - Run command in background\n";
 }
 
-// Integrate the execute_command function with new capabilities
-void execute_command(const vector<string>& args, const string& fullCommand) {
+void execute_command(const vector<string>& args) {
     if (args.empty()) return;
 
-    command_history.push_back(args[0]);
-  
-    if (args[0] == "help") {
-        print_help();
-    }
-
-    else if (args[0] == "cd") {
+    string command = args[0];
+    
+    // Handle built-in commands
+    if (command == "cd") {
         if (args.size() < 2) {
-            cerr << "Error: cd command requires a directory name.\n";
+            char current_dir[MAX_PATH];
+            if (GetCurrentDirectoryA(MAX_PATH, current_dir)) {
+                cout << current_dir << endl;
+            }
         } else {
             if (_chdir(args[1].c_str()) != 0) {
-                cerr << "Error: Could not change directory to '" << args[1] << "'.\n";
-                if (errno == ENOENT) {
-                    cerr << "Directory does not exist.\n";
-                }
+                cerr << "Error changing directory" << endl;
             }
         }
     }
-
-    else if (args[0] == "pwd") {
+    else if (command == "clear") {
+        system("cls");  // Windows clear screen command
+    }
+    else if (command == "pwd") {
         char cwd[1024];
         if (_getcwd(cwd, sizeof(cwd))) {
-            cout << "Current directory: " << cwd << endl;
-        } else {
-            cerr << "Error: Unable to get current directory.\n";
+            cout << cwd << endl;
         }
     }
-
-    else if (args[0] == "clear") {
-        system("cls");
-    }
-
-    else if (args[0] == "history") {
+    else if (command == "history") {
         cout << "Command history (last 10 commands):\n";
         int start = (command_history.size() > 10) ? command_history.size() - 10 : 0;
         for (size_t i = start; i < command_history.size(); i++) {
             cout << "  " << i + 1 << ": " << command_history[i] << endl;
         }
     }
-
-    else if (args[0] == "ls" || args[0] == "ll") {
-        string path = (args.size() > 1) ? args[1] : ".";
-        bool long_format = (args[0] == "ll");
-
-        wstring wpath;
-        if (path.back() != '\\' && path.back() != '/') {
-            wpath = wstring(path.begin(), path.end()) + L"\\*";
-        } else {
-            wpath = wstring(path.begin(), path.end()) + L"*";
-        }
-
-        WIN32_FIND_DATAW findFileData;
-        HANDLE hFind = FindFirstFileW(wpath.c_str(), &findFileData);
-
-        if (hFind == INVALID_HANDLE_VALUE) {
-            DWORD err = GetLastError();
-            if (err != ERROR_FILE_NOT_FOUND) {
-                cerr << "Error: Cannot access directory (code " << err << ").\n";
-            }
-            return;
-        }
-
-        do {
-            string filename = wide_to_narrow(findFileData.cFileName);
-            if (filename == "." || filename == "..") continue;
-
-            if (long_format) {
-                cout << ((findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "[D] " : "[F] ");
-                cout << setw(30) << left << filename;
-                
-                if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    cout << " " << setw(10) << right 
-                         << (findFileData.nFileSizeLow / 1024) << " KB";
+    else if (command == "ls" || command == "ll") {
+        WIN32_FIND_DATAA findData;
+        HANDLE hFind;
+        string path = args.size() > 1 ? args[1] : ".";
+        bool long_format = (command == "ll");
+        
+        hFind = FindFirstFileA((path + "\\*").c_str(), &findData);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (strcmp(findData.cFileName, ".") == 0 || strcmp(findData.cFileName, "..") == 0)
+                    continue;
+                    
+                if (long_format) {
+                    // Get file size
+                    ULARGE_INTEGER fileSize;
+                    fileSize.LowPart = findData.nFileSizeLow;
+                    fileSize.HighPart = findData.nFileSizeHigh;
+                    
+                    // Get file attributes
+                    string attributes;
+                    if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                        attributes += "d";
+                    if (findData.dwFileAttributes & FILE_ATTRIBUTE_READONLY)
+                        attributes += "r";
+                    if (findData.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)
+                        attributes += "h";
+                    if (findData.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM)
+                        attributes += "s";
+                    
+                    // Get last write time
+                    SYSTEMTIME st;
+                    FileTimeToSystemTime(&findData.ftLastWriteTime, &st);
+                    
+                    cout << setw(10) << left << attributes
+                         << setw(12) << right << fileSize.QuadPart
+                         << " " << setw(2) << st.wMonth << "/" 
+                         << setw(2) << st.wDay << "/" 
+                         << setw(4) << st.wYear << " "
+                         << setw(2) << st.wHour << ":"
+                         << setw(2) << st.wMinute << " "
+                         << findData.cFileName << endl;
+                } else {
+                    cout << findData.cFileName << endl;
                 }
-                cout << endl;
-            } else {
-                cout << filename << "  ";
-            }
-        } while (FindNextFileW(hFind, &findFileData) != 0);
-
-        FindClose(hFind);
-        if (!long_format) cout << endl;
+            } while (FindNextFileA(hFind, &findData));
+            FindClose(hFind);
+        }
     }
-
-    else if (args[0] == "mkdir") {
+    else if (command == "alias") {
+        handle_alias_command(args);
+    }
+    else if (command == "mkdir") {
         if (args.size() < 2) {
-            cerr << "Error: mkdir requires a directory name.\n";
+            cerr << "Error: mkdir requires a directory name" << endl;
         } else {
             if (_mkdir(args[1].c_str()) == 0) {
-                cout << "Directory '" << args[1] << "' created successfully.\n";
+                cout << "Directory created successfully" << endl;
             } else {
-                cerr << "Error: Could not create directory '" << args[1] << "'.\n";
-                if (errno == EEXIST) {
-                    cerr << "Directory already exists.\n";
-                }
+                cerr << "Error creating directory" << endl;
             }
         }
     }
-
-    else if (args[0] == "touch") {
+    else if (command == "touch") {
         if (args.size() < 2) {
-            cerr << "Error: touch requires a filename.\n";
+            cerr << "Error: touch requires a filename" << endl;
         } else {
             ofstream file(args[1], ios::app);
             if (file) {
                 file.close();
-                cout << "File '" << args[1] << "' created/updated successfully.\n";
+                cout << "File created/updated successfully" << endl;
             } else {
-                cerr << "Error: Failed to create or modify file '" << args[1] << "'.\n";
+                cerr << "Error creating/updating file" << endl;
             }
         }
     }
-
-    else if (args[0] == "rm") {
+    else if (command == "rm") {
         if (args.size() < 2) {
-            cerr << "Error: rm requires a filename.\n";
+            cerr << "Error: rm requires a filename" << endl;
         } else {
             if (remove(args[1].c_str()) == 0) {
-                cout << "File '" << args[1] << "' deleted successfully.\n";
+                cout << "File deleted successfully" << endl;
             } else {
-                cerr << "Error: Could not delete file '" << args[1] << "'.\n";
-                if (errno == ENOENT) {
-                    cerr << "File does not exist.\n";
-                }
+                cerr << "Error deleting file" << endl;
             }
         }
     }
-
-    else if (args[0] == "cat") {
+    else if (command == "cat") {
         if (args.size() < 2) {
-            cerr << "Error: cat requires a filename.\n";
+            cerr << "Error: cat requires a filename" << endl;
         } else {
             ifstream file(args[1]);
-            if (!file) {
-                cerr << "Error: Cannot open file '" << args[1] << "'.\n";
-            } else {
+            if (file) {
                 string line;
                 while (getline(file, line)) {
                     cout << line << endl;
                 }
                 file.close();
-            }
-        }
-    }
-
-    else if (args[0] == "cp") {
-        if (args.size() < 3) {
-            cerr << "Error: cp requires source and destination filenames.\n";
-        } else {
-            ifstream src(args[1], ios::binary);
-            ofstream dst(args[2], ios::binary);
-            if (!src || !dst) {
-                cerr << "Error: Could not copy file.\n";
             } else {
-                dst << src.rdbuf();
-                cout << "File copied from '" << args[1] << "' to '" << args[2] << "'.\n";
+                cerr << "Error reading file" << endl;
             }
         }
     }
-
-    else if (args[0] == "mv") {
-        if (args.size() < 3) {
-            cerr << "Error: mv requires source and destination filenames.\n";
-        } else {
-            if (rename(args[1].c_str(), args[2].c_str()) == 0) {
-                cout << "File moved from '" << args[1] << "' to '" << args[2] << "'.\n";
-            } else {
-                cerr << "Error: Could not move file.\n";
-            }
-        }
+    else if (command == "help") {
+        print_help();
     }
-
-    else if (args[0] == "time") {
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        printf("Current time: %02d:%02d:%02d\n", st.wHour, st.wMinute, st.wSecond);
-    }
-
-    // Program Manager Commands
-    else if (args[0] == "jobs") {
+    else if (command == "jobs") {
         listJobs();
     }
-    
-    else if (args[0] == "fg" && args.size() > 1) {
+    else if (command == "fg") {
+        if (args.size() < 2) {
+            cout << "Usage: fg <job_id>" << endl;
+            return;
+        }
         fg(stoi(args[1]));
     }
-    
-    else if (args[0] == "kill" && args.size() > 1) {
+    else if (command == "kill") {
+        if (args.size() < 2) {
+            cout << "Usage: kill <job_id>" << endl;
+            return;
+        }
         killJob(stoi(args[1]));
     }
-    
-    else if (args[0] == "run" && args.size() > 1) {
-        string cmd = fullCommand.substr(4); // Remove "run " prefix
-        launchBackgroundProcess(cmd);
-    }
-    
-    else if (args[0] == "ping" && args.size() > 1) {
-        runPingCommand(args[1]);
-    }
-    
-    // Handle piping and redirection based on the full command
-    else if (fullCommand.find('|') != string::npos) {
-        runPipedCommand(fullCommand);
-    }
-    
-    else if (fullCommand.find('>') != string::npos || fullCommand.find('<') != string::npos) {
-        runWithRedirection(fullCommand);
-    }
-
     else {
-        string cmd;
-        for (const auto& arg : args) cmd += arg + " ";
-
-        if (cmd.find(".exe") != string::npos || args[0] == "notepad" || args[0] == "calc") {
-            system(("start \"\" " + cmd).c_str());
+        // Handle external commands
+        string fullCommand;
+        for (const auto& arg : args) {
+            fullCommand += arg + " ";
+        }
+        
+        // Check for background execution
+        if (fullCommand.back() == '&') {
+            fullCommand.pop_back(); // Remove the &
+            launchBackgroundProcess(fullCommand);
+            return;
+        }
+        
+        // Check for piping
+        if (fullCommand.find('|') != string::npos) {
+            runPipedCommand(fullCommand);
+            return;
+        }
+        
+        // Check for redirection
+        if (fullCommand.find('>') != string::npos || fullCommand.find('<') != string::npos) {
+            runWithRedirection(fullCommand);
+            return;
+        }
+        
+        // Regular command execution
+        STARTUPINFOA si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        
+        string cmdLine = "cmd.exe /C " + fullCommand;
+        char* cmd = _strdup(cmdLine.c_str());
+        
+        if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
         } else {
-            system(cmd.c_str());
+            cerr << "Failed to execute command: " << fullCommand << endl;
         }
+        
+        free(cmd);
     }
-}
-
-// Updated main function integrating both functionalities
-int main() {
-    cout << "Integrated Shell v1.0\n";
-    cout << "Type 'help' for available commands, 'exit' to quit.\n";
-    
-    while (true) {
-        char cwd[1024];
-        if (_getcwd(cwd, sizeof(cwd))) {
-            cout << "\n" << cwd << " > ";
-        } else {
-            cout << "\nShell > ";
-        }
-        
-        string input;
-        getline(cin, input);
-
-        if (input == "exit") break;
-        
-        // Check if we need to handle aliases - commented out until alias function is implemented
-        // if (handle_alias_command(split(input, ' '))) continue;
-        
-        // Check if we need special handling for piping or redirection
-        if (input.find('|') != string::npos) {
-            runPipedCommand(input);
-        }
-        else if (input.find('>') != string::npos || input.find('<') != string::npos) {
-            runWithRedirection(input);
-        }
-        else {
-            // Split the command into arguments for regular processing
-            vector<string> args;
-            string arg;
-            istringstream iss(input);
-            while (iss >> arg) {
-                args.push_back(arg);
-            }
-            
-            execute_command(args, input);
-        }
-    }
-
-    return 0;
 }
