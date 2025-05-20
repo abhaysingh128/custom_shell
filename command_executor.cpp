@@ -51,46 +51,110 @@ vector<string> split(const string &str, char delimiter) {
 void addJob(HANDLE hProcess, DWORD pid, const string& command) {
     Job newJob = { jobCounter++, hProcess, pid, command, true };
     jobList.push_back(newJob);
-    cout << "[" << newJob.id << "] " << pid << " started in background\n";
+    cout << "[" << newJob.id << "] " << pid << " started: " << command << endl;
 }
 
 void listJobs() {
     cout << "Active Background Jobs:\n";
-    for (auto& job : jobList) {
+    bool hasJobs = false;
+    
+    for (auto it = jobList.begin(); it != jobList.end();) {
         DWORD exitCode;
-        GetExitCodeProcess(job.hProcess, &exitCode);
+        if (!GetExitCodeProcess(it->hProcess, &exitCode)) {
+            // Process handle is invalid, remove it
+            CloseHandle(it->hProcess);
+            it = jobList.erase(it);
+            continue;
+        }
 
         // If process is still active, mark as Running
         bool stillRunning = (exitCode == STILL_ACTIVE);
-        string status = stillRunning ? "Running" : "Exited";
-
-        cout << "[" << job.id << "] PID: " << job.pid
-             << " Command: " << job.command
-             << " Status: " << status << endl;
+        
+        if (stillRunning) {
+            hasJobs = true;
+            cout << "[" << it->id << "] PID: " << it->pid
+                 << " Command: " << it->command
+                 << " Status: Running" << endl;
+            ++it;
+        } else {
+            // Process has ended, remove it from the list
+            CloseHandle(it->hProcess);
+            it = jobList.erase(it);
+        }
+    }
+    
+    if (!hasJobs) {
+        cout << "No active background jobs.\n";
     }
 }
 
+// Add these callback functions at the top level
+BOOL CALLBACK FindWindowByProcessId(HWND hwnd, LPARAM lParam) {
+    DWORD processId;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId == *(DWORD*)lParam) {
+        SetForegroundWindow(hwnd);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL CALLBACK CloseWindowByProcessId(HWND hwnd, LPARAM lParam) {
+    DWORD processId;
+    GetWindowThreadProcessId(hwnd, &processId);
+    if (processId == *(DWORD*)lParam) {
+        PostMessage(hwnd, WM_CLOSE, 0, 0);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// Update the fg function
 void fg(int jobId) {
-    for (auto &job : jobList) {
-        if (job.id == jobId) {
-            cout << "Bringing job [" << job.id << "] to foreground...\n";
-            WaitForSingleObject(job.hProcess, INFINITE);  // Wait for completion
-            // Optional: Add timeout here to break after certain time.
-            CloseHandle(job.hProcess);
-            job.isRunning = false;
+    for (auto it = jobList.begin(); it != jobList.end(); ++it) {
+        if (it->id == jobId) {
+            cout << "Bringing job [" << it->id << "] to foreground...\n";
+            
+            // Try to bring the window to foreground
+            HWND hwnd = NULL;
+            DWORD processId = it->pid;
+            
+            // Find the window associated with this process
+            EnumWindows(FindWindowByProcessId, (LPARAM)&processId);
+            
+            WaitForSingleObject(it->hProcess, INFINITE);
+            DWORD exitCode;
+            GetExitCodeProcess(it->hProcess, &exitCode);
+            cout << "Job [" << it->id << "] completed with exit code: " << exitCode << endl;
+            CloseHandle(it->hProcess);
+            jobList.erase(it);
             return;
         }
     }
     cout << "Error: Job ID not found.\n";
 }
 
+// Update the killJob function
 void killJob(int jobId) {
     for (auto it = jobList.begin(); it != jobList.end(); ++it) {
         if (it->id == jobId) {
             cout << "Killing job [" << it->id << "]...\n";
-            TerminateProcess(it->hProcess, 0);
+            
+            // Try to find and close the window first
+            HWND hwnd = NULL;
+            DWORD processId = it->pid;
+            
+            EnumWindows(CloseWindowByProcessId, (LPARAM)&processId);
+            
+            // Give the process a chance to close gracefully
+            if (WaitForSingleObject(it->hProcess, 1000) == WAIT_TIMEOUT) {
+                // If it's still running, force terminate
+                TerminateProcess(it->hProcess, 0);
+            }
+            
             CloseHandle(it->hProcess);
             jobList.erase(it);
+            cout << "Job [" << jobId << "] terminated.\n";
             return;
         }
     }
@@ -476,86 +540,76 @@ void execute_command(const vector<string>& args) {
         si.cb = sizeof(si);
         ZeroMemory(&pi, sizeof(pi));
 
-        // Create pipes for stdout and stderr
-        HANDLE hStdoutRd, hStdoutWr, hStderrRd, hStderrWr;
-        SECURITY_ATTRIBUTES saAttr;
-        saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-        saAttr.bInheritHandle = TRUE;
-        saAttr.lpSecurityDescriptor = NULL;
-
-        // Create pipe for stdout
-        if (!CreatePipe(&hStdoutRd, &hStdoutWr, &saAttr, 0)) {
-            cerr << "Failed to create stdout pipe" << endl;
-            return;
-        }
-
-        // Create pipe for stderr
-        if (!CreatePipe(&hStderrRd, &hStderrWr, &saAttr, 0)) {
-            cerr << "Failed to create stderr pipe" << endl;
-            CloseHandle(hStdoutRd);
-            CloseHandle(hStdoutWr);
-            return;
-        }
-
-        // Ensure the read handles are not inherited
-        SetHandleInformation(hStdoutRd, HANDLE_FLAG_INHERIT, 0);
-        SetHandleInformation(hStderrRd, HANDLE_FLAG_INHERIT, 0);
-
-        // Set up the startup info structure
-        si.dwFlags |= STARTF_USESTDHANDLES;
-        si.hStdOutput = hStdoutWr;
-        si.hStdError = hStderrWr;
-        
         // Build the command line
-        string cmdLine = args[1];
+        string programPath;
+        if (args[1].find('\\') != string::npos || args[1].find('/') != string::npos) {
+            // If path is provided, use it directly
+            programPath = args[1];
+        } else {
+            // Try to find the program in system directories
+            char systemPath[MAX_PATH];
+            GetSystemDirectoryA(systemPath, MAX_PATH);
+            
+            char windowsPath[MAX_PATH];
+            GetWindowsDirectoryA(windowsPath, MAX_PATH);
+            
+            // Common program paths
+            const char* commonPaths[] = {
+                systemPath,
+                windowsPath,
+                "C:\\Program Files",
+                "C:\\Program Files (x86)",
+                "C:\\Windows\\System32",
+                "C:\\Windows"
+            };
+            
+            bool found = false;
+            for (const char* path : commonPaths) {
+                string fullPath = string(path) + "\\" + args[1];
+                if (GetFileAttributesA(fullPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    programPath = fullPath;
+                    found = true;
+                    break;
+                }
+            }
+            
+            if (!found) {
+                // If not found in common paths, try using the program name directly
+                programPath = args[1];
+            }
+        }
+
+        // Build the command line with arguments
+        string cmdLine = "\"" + programPath + "\"";
         for (size_t i = 2; i < args.size(); i++) {
-            cmdLine += " " + args[i];
+            cmdLine += " \"" + args[i] + "\"";
         }
         
         char* cmd = _strdup(cmdLine.c_str());
         
         BOOL success = CreateProcessA(
-            NULL,           // No module name (use command line)
-            cmd,            // Command line
-            NULL,           // Process handle not inheritable
-            NULL,           // Thread handle not inheritable
-            TRUE,           // Set handle inheritance to TRUE
-            0,              // No creation flags
-            NULL,           // Use parent's environment block
-            NULL,           // Use parent's starting directory
-            &si,            // Pointer to STARTUPINFO structure
-            &pi             // Pointer to PROCESS_INFORMATION structure
+            programPath.c_str(),  // Application name
+            cmd,                  // Command line
+            NULL,                 // Process handle not inheritable
+            NULL,                 // Thread handle not inheritable
+            TRUE,                 // Set handle inheritance to TRUE
+            CREATE_NEW_CONSOLE,   // Create new console window
+            NULL,                 // Use parent's environment block
+            NULL,                 // Use parent's starting directory
+            &si,                  // Pointer to STARTUPINFO structure
+            &pi                   // Pointer to PROCESS_INFORMATION structure
         );
         
         if (success) {
-            // Close the write ends of the pipes
-            CloseHandle(hStdoutWr);
-            CloseHandle(hStderrWr);
-
-            // Read from stdout
-            char buffer[4096];
-            DWORD bytesRead;
-            while (ReadFile(hStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
-                buffer[bytesRead] = '\0';
-                cout << buffer;
-            }
-
-            // Read from stderr
-            while (ReadFile(hStderrRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
-                buffer[bytesRead] = '\0';
-                cerr << buffer;
-            }
-
-            // Wait for the process to complete
-            WaitForSingleObject(pi.hProcess, INFINITE);
+            // Add the process to job list
+            addJob(pi.hProcess, pi.dwProcessId, args[1]);
             
-            // Close process and thread handles
-            CloseHandle(pi.hProcess);
+            // Close the thread handle as we don't need it
             CloseHandle(pi.hThread);
-            CloseHandle(hStdoutRd);
-            CloseHandle(hStderrRd);
         } else {
-            cerr << "Failed to execute program: " << cmdLine << endl;
+            DWORD error = GetLastError();
+            cerr << "Failed to execute program: " << programPath << endl;
+            cerr << "Error code: " << error << endl;
         }
         
         free(cmd);
