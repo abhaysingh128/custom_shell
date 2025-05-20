@@ -463,6 +463,103 @@ void execute_command(const vector<string>& args) {
         }
         killJob(stoi(args[1]));
     }
+    else if (command == "run") {
+        if (args.size() < 2) {
+            cout << "Usage: run <program_name>" << endl;
+            return;
+        }
+        
+        // Regular command execution
+        STARTUPINFOA si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+
+        // Create pipes for stdout and stderr
+        HANDLE hStdoutRd, hStdoutWr, hStderrRd, hStderrWr;
+        SECURITY_ATTRIBUTES saAttr;
+        saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+        saAttr.bInheritHandle = TRUE;
+        saAttr.lpSecurityDescriptor = NULL;
+
+        // Create pipe for stdout
+        if (!CreatePipe(&hStdoutRd, &hStdoutWr, &saAttr, 0)) {
+            cerr << "Failed to create stdout pipe" << endl;
+            return;
+        }
+
+        // Create pipe for stderr
+        if (!CreatePipe(&hStderrRd, &hStderrWr, &saAttr, 0)) {
+            cerr << "Failed to create stderr pipe" << endl;
+            CloseHandle(hStdoutRd);
+            CloseHandle(hStdoutWr);
+            return;
+        }
+
+        // Ensure the read handles are not inherited
+        SetHandleInformation(hStdoutRd, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(hStderrRd, HANDLE_FLAG_INHERIT, 0);
+
+        // Set up the startup info structure
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdOutput = hStdoutWr;
+        si.hStdError = hStderrWr;
+        
+        // Build the command line
+        string cmdLine = args[1];
+        for (size_t i = 2; i < args.size(); i++) {
+            cmdLine += " " + args[i];
+        }
+        
+        char* cmd = _strdup(cmdLine.c_str());
+        
+        BOOL success = CreateProcessA(
+            NULL,           // No module name (use command line)
+            cmd,            // Command line
+            NULL,           // Process handle not inheritable
+            NULL,           // Thread handle not inheritable
+            TRUE,           // Set handle inheritance to TRUE
+            0,              // No creation flags
+            NULL,           // Use parent's environment block
+            NULL,           // Use parent's starting directory
+            &si,            // Pointer to STARTUPINFO structure
+            &pi             // Pointer to PROCESS_INFORMATION structure
+        );
+        
+        if (success) {
+            // Close the write ends of the pipes
+            CloseHandle(hStdoutWr);
+            CloseHandle(hStderrWr);
+
+            // Read from stdout
+            char buffer[4096];
+            DWORD bytesRead;
+            while (ReadFile(hStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+                buffer[bytesRead] = '\0';
+                cout << buffer;
+            }
+
+            // Read from stderr
+            while (ReadFile(hStderrRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+                buffer[bytesRead] = '\0';
+                cerr << buffer;
+            }
+
+            // Wait for the process to complete
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            
+            // Close process and thread handles
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            CloseHandle(hStdoutRd);
+            CloseHandle(hStderrRd);
+        } else {
+            cerr << "Failed to execute program: " << cmdLine << endl;
+        }
+        
+        free(cmd);
+    }
     else {
         // Handle external commands
         string fullCommand;
@@ -495,9 +592,39 @@ void execute_command(const vector<string>& args) {
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
         ZeroMemory(&pi, sizeof(pi));
+
+        // Create pipes for stdout and stderr
+        HANDLE hStdoutRd, hStdoutWr, hStderrRd, hStderrWr;
+        SECURITY_ATTRIBUTES saAttr;
+        saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+        saAttr.bInheritHandle = TRUE;
+        saAttr.lpSecurityDescriptor = NULL;
+
+        // Create pipe for stdout
+        if (!CreatePipe(&hStdoutRd, &hStdoutWr, &saAttr, 0)) {
+            cerr << "Failed to create stdout pipe" << endl;
+            return;
+        }
+
+        // Create pipe for stderr
+        if (!CreatePipe(&hStderrRd, &hStderrWr, &saAttr, 0)) {
+            cerr << "Failed to create stderr pipe" << endl;
+            CloseHandle(hStdoutRd);
+            CloseHandle(hStdoutWr);
+            return;
+        }
+
+        // Ensure the read handles are not inherited
+        SetHandleInformation(hStdoutRd, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(hStderrRd, HANDLE_FLAG_INHERIT, 0);
+
+        // Set up the startup info structure
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdOutput = hStdoutWr;
+        si.hStdError = hStderrWr;
         
-        // Use CreateProcess directly for better control
-        string cmdLine = fullCommand;
+        // Use cmd.exe to execute the command
+        string cmdLine = "cmd.exe /C " + fullCommand;
         char* cmd = _strdup(cmdLine.c_str());
         
         BOOL success = CreateProcessA(
@@ -505,8 +632,8 @@ void execute_command(const vector<string>& args) {
             cmd,            // Command line
             NULL,           // Process handle not inheritable
             NULL,           // Thread handle not inheritable
-            FALSE,          // Set handle inheritance to FALSE
-            CREATE_NEW_CONSOLE, // Create new console window
+            TRUE,           // Set handle inheritance to TRUE
+            0,              // No creation flags
             NULL,           // Use parent's environment block
             NULL,           // Use parent's starting directory
             &si,            // Pointer to STARTUPINFO structure
@@ -514,12 +641,32 @@ void execute_command(const vector<string>& args) {
         );
         
         if (success) {
+            // Close the write ends of the pipes
+            CloseHandle(hStdoutWr);
+            CloseHandle(hStderrWr);
+
+            // Read from stdout
+            char buffer[4096];
+            DWORD bytesRead;
+            while (ReadFile(hStdoutRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+                buffer[bytesRead] = '\0';
+                cout << buffer;
+            }
+
+            // Read from stderr
+            while (ReadFile(hStderrRd, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+                buffer[bytesRead] = '\0';
+                cerr << buffer;
+            }
+
             // Wait for the process to complete
             WaitForSingleObject(pi.hProcess, INFINITE);
             
             // Close process and thread handles
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
+            CloseHandle(hStdoutRd);
+            CloseHandle(hStderrRd);
         } else {
             cerr << "Failed to execute command: " << fullCommand << endl;
         }
