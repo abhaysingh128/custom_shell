@@ -593,7 +593,7 @@ void execute_command(const vector<string>& args) {
             NULL,                 // Process handle not inheritable
             NULL,                 // Thread handle not inheritable
             TRUE,                 // Set handle inheritance to TRUE
-            CREATE_NEW_CONSOLE,   // Create new console window
+            0,                    // No creation flags - removed CREATE_NEW_CONSOLE
             NULL,                 // Use parent's environment block
             NULL,                 // Use parent's starting directory
             &si,                  // Pointer to STARTUPINFO structure
