@@ -614,7 +614,13 @@ void print_help() {
          << "  banao <file>     - Create/update a file\n"
          << "  hatao <file>     - Delete a file\n"
          << "  dikhhao <file>   - Display file contents\n"
-         << "  badlo <old> <new>- Rename file\n";
+         << "  badlo <old> <new>- Rename file\n"
+         << "\nShell Features:\n"
+         << "  Tab Completion  - Press TAB to autocomplete commands and filenames\n"
+         << "  Command History - Use UP/DOWN arrow keys to navigate through command history\n"
+         << "  Aliases        - Create shortcuts for commands using 'alias name=command'\n"
+         << "                   Example: alias ll='ls -l'\n"
+         << "                   Type 'alias' to see all defined aliases\n";
 }
 
 void execute_command(const vector<string>& args) {
@@ -625,7 +631,11 @@ void execute_command(const vector<string>& args) {
     for (auto &c : command) c = tolower(c);
     cout << "[DEBUG] Running command: '" << command << "'" << endl;
     
-    if (command == "jobs") {
+    if (command == "alias") {
+        handle_alias_command(args);
+        return;
+    }
+    else if (command == "jobs") {
         listJobs();
         return;
     }
@@ -948,7 +958,7 @@ void execute_command(const vector<string>& args) {
 int main() {
     string input;
     vector<string> args;
-
+    
     init_signals();
 
     if (!authenticateShell()) {
@@ -959,10 +969,7 @@ int main() {
     cout << "Custom Shell (type 'help' for commands)\n";
 
     while (true) {
-        char cwd[MAX_PATH];
-        if (_getcwd(cwd, MAX_PATH)) {
-            cout << "\n" << cwd << " ";
-        }
+        cout << "\nShell> ";
 
         input = get_input_with_features();
         if (input.empty()) continue;
