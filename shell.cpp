@@ -16,6 +16,8 @@
 #include <conio.h>
 #include <algorithm>
 #include <io.h>
+#include <cctype>
+#include <cmath>
 
 using namespace std;
 
@@ -27,6 +29,17 @@ map<string, string> alias_map;
 volatile sig_atomic_t interrupted = 0;
 int history_index = -1;
 
+struct Job {
+    int id;
+    HANDLE hProcess;
+    DWORD pid;
+    string command;
+    bool isRunning;
+};
+
+vector<Job> jobList;
+int jobCounter = 1;
+
 // Forward declarations
 string resolve_alias(const string& input);
 void execute_command(const vector<string>& args);
@@ -35,6 +48,43 @@ void autocomplete(string& input);
 string get_input_with_features();
 void signal_handler(int signal);
 void init_signals();
+void count_word_in_file(const string& filename, const string& word);
+void word_frequency(const string& filename);
+void calculator(const string& num1_str, const string& op, const string& num2_str);
+void addJob(HANDLE hProcess, DWORD pid, const string& command);
+void listJobs();
+void fg(int jobId);
+void killJob(int jobId);
+void launchBackgroundProcess(const string& command);
+void runPipedCommand(const string& command);
+void runWithRedirection(const string& command);
+void runPingCommand(const string& host);
+void scheduleCommand(const string& command, int delaySeconds);
+void addNote(const string& note);
+void viewNotes();
+bool authenticateShell();
+void lockShell();
+
+// Helper function to convert string to lowercase
+string to_lower(string str) {
+    transform(str.begin(), str.end(), str.begin(), ::tolower);
+    return str;
+}
+
+// Helper function to split string into words
+vector<string> split_words(const string& text) {
+    vector<string> words;
+    istringstream iss(text);
+    string word;
+    while (iss >> word) {
+        // Remove punctuation
+        word.erase(remove_if(word.begin(), word.end(), ::ispunct), word.end());
+        if (!word.empty()) {
+            words.push_back(to_lower(word));
+        }
+    }
+    return words;
+}
 
 // Signal handler
 void signal_handler(int signal) {
@@ -93,9 +143,9 @@ bool handle_alias_command(const vector<string>& args) {
     return true;
 }
 
-// Input handling
+// String conversion helper
 string wide_to_narrow(const wchar_t* wide) {
-    std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+    wstring_convert<codecvt_utf8<wchar_t>> converter;
     return converter.to_bytes(wide);
 }
 
@@ -106,23 +156,23 @@ void autocomplete(string& input) {
 
     vector<string> suggestions;
 
-    WIN32_FIND_DATA findFileData;
-    HANDLE hFind = FindFirstFile("*.*", &findFileData);
-    
+    WIN32_FIND_DATAA findFileData;
+    HANDLE hFind = FindFirstFileA("*.*", &findFileData);
+
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
             string name = findFileData.cFileName;
             if (name != "." && name != ".." && name.rfind(prefix, 0) == 0) {
                 suggestions.push_back(name);
             }
-        } while (FindNextFile(hFind, &findFileData));
+        } while (FindNextFileA(hFind, &findFileData));
         FindClose(hFind);
     }
 
     vector<string> commands = {
         "help", "cd", "pwd", "clear", "history", "ls", "ll", "mkdir",
-        "touch", "rm", "cat", "cp", "mv", "time", "exit", "jobs", "fg",
-        "kill", "run", "ping", "schedule", "note", "lock"
+        "touch", "rm", "cat", "cp", "mv", "time", "exit", 
+        "banao", "hatao", "dikhhao", "badlo", "count", "wordfreq", "calc"
     };
 
     for (const auto& cmd : commands) {
@@ -154,7 +204,7 @@ string get_input_with_features() {
         } else if (ch == 0 || ch == -32) {
             ch = _getch();
 
-            if (ch == 72) {
+            if (ch == 72) { // Up arrow
                 if (!command_history.empty() && history_index > 0)
                     history_index--;
                 else if (history_index == -1 && !command_history.empty())
@@ -164,7 +214,7 @@ string get_input_with_features() {
                     input = command_history[history_index];
                     cout << "\r" << input << string(50, ' ');
                 }
-            } else if (ch == 80) {
+            } else if (ch == 80) { // Down arrow
                 if (!command_history.empty() && history_index < (int)command_history.size() - 1)
                     history_index++;
                 else
@@ -194,228 +244,108 @@ string get_input_with_features() {
     return resolve_alias(input);
 }
 
-// Command execution
-void execute_command(const vector<string>& args) {
-    if (handle_alias_command(args)) return;
-
-    if (args.empty()) return;
-
-    command_history.push_back(args[0]);
-
-    if (args[0] == "help") {
-        print_help();
+void count_word_in_file(const string& filename, const string& word) {
+    ifstream file(filename);
+    if (!file) {
+        cerr << "Error: Cannot open file '" << filename << "'" << endl;
+        return;
     }
-    else if (args[0] == "cd") {
-        if (args.size() < 2) {
-            cerr << "Error: cd command requires a directory name.\n";
-        } else {
-            if (_chdir(args[1].c_str()) != 0) {
-                cerr << "Error: Could not change directory to '" << args[1] << "'.\n";
-                if (errno == ENOENT) {
-                    cerr << "Directory does not exist.\n";
-                }
+    
+    string search_word = to_lower(word);
+    string line;
+    int count = 0;
+    
+    while (getline(file, line)) {
+        vector<string> words = split_words(line);
+        for (const string& w : words) {
+            if (w == search_word) {
+                count++;
             }
         }
     }
-    else if (args[0] == "pwd") {
-        char cwd[1024];
-        if (_getcwd(cwd, sizeof(cwd))) {
-            cout << "Current directory: " << cwd << endl;
-        } else {
-            cerr << "Error: Unable to get current directory.\n";
-        }
-    }
-    else if (args[0] == "clear") {
-        system("cls");
-    }
-    else if (args[0] == "history") {
-        cout << "Command history (last 10 commands):\n";
-        int start = (command_history.size() > 10) ? command_history.size() - 10 : 0;
-        for (size_t i = start; i < command_history.size(); i++) {
-            cout << "  " << i + 1 << ": " << command_history[i] << endl;
-        }
-    }
-    else if (args[0] == "ls" || args[0] == "ll") {
-        string path = (args.size() > 1) ? args[1] : ".";
-        bool long_format = (args[0] == "ll");
-
-        wstring wpath;
-        if (path.back() != '\\' && path.back() != '/') {
-            wpath = wstring(path.begin(), path.end()) + L"\\*";
-        } else {
-            wpath = wstring(path.begin(), path.end()) + L"*";
-        }
-
-        WIN32_FIND_DATAW findFileData;
-        HANDLE hFind = FindFirstFileW(wpath.c_str(), &findFileData);
-
-        if (hFind == INVALID_HANDLE_VALUE) {
-            DWORD err = GetLastError();
-            if (err != ERROR_FILE_NOT_FOUND) {
-                cerr << "Error: Cannot access directory (code " << err << ").\n";
-            }
-            return;
-        }
-
-        do {
-            string filename = wide_to_narrow(findFileData.cFileName);
-            if (filename == "." || filename == "..") continue;
-
-            if (long_format) {
-                cout << ((findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "[D] " : "[F] ");
-                cout << setw(30) << left << filename;
-                
-                if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    cout << " " << setw(10) << right 
-                         << (findFileData.nFileSizeLow / 1024) << " KB";
-                }
-                cout << endl;
-            } else {
-                cout << filename << "  ";
-            }
-        } while (FindNextFileW(hFind, &findFileData) != 0);
-
-        FindClose(hFind);
-        if (!long_format) cout << endl;
-    }
-    else if (args[0] == "mkdir") {
-        if (args.size() < 2) {
-            cerr << "Error: mkdir requires a directory name.\n";
-        } else {
-            if (_mkdir(args[1].c_str()) == 0) {
-                cout << "Directory '" << args[1] << "' created successfully.\n";
-            } else {
-                cerr << "Error: Could not create directory '" << args[1] << "'.\n";
-                if (errno == EEXIST) {
-                    cerr << "Directory already exists.\n";
-                }
-            }
-        }
-    }
-    else if (args[0] == "touch") {
-        if (args.size() < 2) {
-            cerr << "Error: touch requires a filename.\n";
-        } else {
-            ofstream file(args[1], ios::app);
-            if (file) {
-                file.close();
-                cout << "File '" << args[1] << "' created/updated successfully.\n";
-            } else {
-                cerr << "Error: Failed to create or modify file '" << args[1] << "'.\n";
-            }
-        }
-    }
-    else if (args[0] == "rm") {
-        if (args.size() < 2) {
-            cerr << "Error: rm requires a filename.\n";
-        } else {
-            if (remove(args[1].c_str()) == 0) {
-                cout << "File '" << args[1] << "' deleted successfully.\n";
-            } else {
-                cerr << "Error: Could not delete file '" << args[1] << "'.\n";
-                if (errno == ENOENT) {
-                    cerr << "File does not exist.\n";
-                }
-            }
-        }
-    }
-    else if (args[0] == "cat") {
-        if (args.size() < 2) {
-            cerr << "Error: cat requires a filename.\n";
-        } else {
-            ifstream file(args[1]);
-            if (!file) {
-                cerr << "Error: Cannot open file '" << args[1] << "'.\n";
-            } else {
-                string line;
-                while (getline(file, line)) {
-                    cout << line << endl;
-                }
-                file.close();
-            }
-        }
-    }
-    else if (args[0] == "cp") {
-        if (args.size() < 3) {
-            cerr << "Error: cp requires source and destination filenames.\n";
-        } else {
-            ifstream src(args[1], ios::binary);
-            ofstream dst(args[2], ios::binary);
-            if (!src || !dst) {
-                cerr << "Error: Could not copy file.\n";
-            } else {
-                dst << src.rdbuf();
-                cout << "File copied from '" << args[1] << "' to '" << args[2] << "'.\n";
-            }
-        }
-    }
-    else if (args[0] == "mv") {
-        if (args.size() < 3) {
-            cerr << "Error: mv requires source and destination filenames.\n";
-        } else {
-            if (rename(args[1].c_str(), args[2].c_str()) == 0) {
-                cout << "File moved from '" << args[1] << "' to '" << args[2] << "'.\n";
-            } else {
-                cerr << "Error: Could not move file.\n";
-            }
-        }
-    }
-    else if (args[0] == "time") {
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        printf("Current time: %02d:%02d:%02d\n", st.wHour, st.wMinute, st.wSecond);
-    }
-    else {
-        string cmd;
-        for (const auto& arg : args) cmd += arg + " ";
-
-        if (cmd.find(".exe") != string::npos || args[0] == "notepad" || args[0] == "calc") {
-            system(("start \"\" " + cmd).c_str());
-        } else {
-            system(cmd.c_str());
-        }
-    }
+    
+    cout << "Word '" << word << "' appears " << count << " times in '" << filename << "'" << endl;
+    file.close();
 }
 
-void print_help() {
-    cout << "Custom Shell Help:\n"
-         << "  help       - Show this help message\n"
-         << "  cd <dir>   - Change directory\n"
-         << "  pwd        - Print working directory\n"
-         << "  clear      - Clear the screen\n"
-         << "  history    - Show command history\n"
-         << "  ls [dir]   - List directory contents (short format)\n"
-         << "  ll [dir]   - List directory contents (long format)\n"
-         << "  mkdir <dir>- Create a directory\n"
-         << "  touch <file>- Create/update a file\n"
-         << "  rm <file>  - Delete a file\n"
-         << "  time       - Show current time\n"
-         << "  exit       - Exit the shell\n"
-         << "  cat <file>   - Display contents of a file\n"
-         << "  cp <src> <dst>- Copy file from src to dst\n"
-         << "  mv <src> <dst>- Move (rename) file from src to dst\n"
-         << "  jobs       - List background jobs\n"
-         << "  fg <job>   - Bring job to foreground\n"
-         << "  kill <job> - Kill a background job\n"
-         << "  run <cmd>  - Run command in background\n"
-         << "  ping <host>- Ping a host\n"
-         << "  schedule <cmd> at <sec>- Schedule a command\n"
-         << "  note add <text>- Add a note\n"
-         << "  note view  - View notes\n"
-         << "  lock      - Lock the shell\n"
-         << "  alias     - Manage command aliases\n";
+void word_frequency(const string& filename) {
+    ifstream file(filename);
+    if (!file) {
+        cerr << "Error: Cannot open file '" << filename << "'" << endl;
+        return;
+    }
+    
+    map<string, int> word_count;
+    string line;
+    
+    while (getline(file, line)) {
+        vector<string> words = split_words(line);
+        for (const string& word : words) {
+            if (!word.empty()) {
+                word_count[word]++;
+            }
+        }
+    }
+    
+    vector<pair<string, int>> freq_pairs(word_count.begin(), word_count.end());
+    
+    sort(freq_pairs.begin(), freq_pairs.end(), 
+         [](const pair<string, int>& a, const pair<string, int>& b) {
+             return a.second > b.second;
+         });
+    
+    cout << "Top 10 most frequent words in '" << filename << "':" << endl;
+    int display_count = min(10, (int)freq_pairs.size());
+    for (int i = 0; i < display_count; i++) {
+        cout << setw(15) << left << freq_pairs[i].first 
+             << ": " << freq_pairs[i].second << endl;
+    }
+    
+    file.close();
 }
 
-struct Job {
-    int id;
-    HANDLE hProcess;
-    DWORD pid;
-    string command;
-    bool isRunning;
-};
-
-vector<Job> jobList;
-int jobCounter = 1;
+void calculator(const string& num1_str, const string& op, const string& num2_str) {
+    try {
+        double num1 = stod(num1_str);
+        double num2 = stod(num2_str);
+        double result = 0;
+        bool valid_op = true;
+        
+        if (op == "+") {
+            result = num1 + num2;
+        } else if (op == "-") {
+            result = num1 - num2;
+        } else if (op == "*" || op == "x") {
+            result = num1 * num2;
+        } else if (op == "/") {
+            if (num2 == 0) {
+                cerr << "Error: Division by zero" << endl;
+                return;
+            }
+            result = num1 / num2;
+        } else if (op == "%") {
+            if (num2 == 0) {
+                cerr << "Error: Division by zero" << endl;
+                return;
+            }
+            result = fmod(num1, num2);
+        } else if (op == "^" || op == "**") {
+            result = pow(num1, num2);
+        } else {
+            valid_op = false;
+            cerr << "Error: Invalid operator '" << op << "'" << endl;
+            cerr << "Supported operators: +, -, *, /, %, ^ (or **)" << endl;
+        }
+        
+        if (valid_op) {
+            cout << num1 << " " << op << " " << num2 << " = " << result << endl;
+        }
+    } catch (const invalid_argument& e) {
+        cerr << "Error: Invalid number format" << endl;
+    } catch (const out_of_range& e) {
+        cerr << "Error: Number out of range" << endl;
+    }
+}
 
 void addJob(HANDLE hProcess, DWORD pid, const string& command) {
     Job newJob = { jobCounter++, hProcess, pid, command, true };
@@ -654,7 +584,371 @@ void lockShell() {
     cout << "Shell unlocked.\n";
 }
 
+void print_help() {
+    cout << "Custom Shell Help:\n"
+         << "  help       - Show this help message\n"
+         << "  cd <dir>   - Change directory\n"
+         << "  pwd        - Print working directory\n"
+         << "  clear      - Clear the screen\n"
+         << "  history    - Show command history\n"
+         << "  ls [dir]   - List directory contents (short format)\n"
+         << "  ll [dir]   - List directory contents (long format with details)\n"
+         << "  dir [dir]  - List directory contents (Windows style)\n"
+         << "  mkdir <dir>- Create a directory\n"
+         << "  touch <file>- Create/update a file\n"
+         << "  rm <file>  - Delete a file\n"
+         << "  cat <file> - Display contents of a file\n"
+         << "  cp <src> <dst>- Copy file from src to dst\n"
+         << "  mv <src> <dst>- Move (rename) file from src to dst\n"
+         << "  time       - Show current time\n"
+         << "  jobs       - List all background jobs\n"
+         << "  fg <jobid> - Bring background job to foreground\n"
+         << "  kill <jobid> - Kill a background job\n"
+         << "  alias [name='command'] - Create or list aliases\n"
+         << "  exit       - Exit the shell\n"
+         << "\nCustom Commands:\n"
+         << "  count <file> <word>    - Count occurrences of word in file\n"
+         << "  wordfreq <file>        - Show word frequency in file (top 10)\n"
+         << "  calc <num1> <op> <num2>- Calculator (+, -, *, /, %, ^)\n"
+         << "\nHindi Commands:\n"
+         << "  banao <file>     - Create/update a file\n"
+         << "  hatao <file>     - Delete a file\n"
+         << "  dikhhao <file>   - Display file contents\n"
+         << "  badlo <old> <new>- Rename file\n";
+}
+
+void execute_command(const vector<string>& args) {
+    if (args.empty()) return;
+    string command = args[0];
+    command.erase(0, command.find_first_not_of(" \n\r\t"));
+    command.erase(command.find_last_not_of(" \n\r\t") + 1);
+    for (auto &c : command) c = tolower(c);
+    cout << "[DEBUG] Running command: '" << command << "'" << endl;
+    
+    if (command == "jobs") {
+        listJobs();
+        return;
+    }
+    else if (command == "fg" && args.size() > 1) {
+        fg(stoi(args[1]));
+        return;
+    }
+    else if (command == "kill" && args.size() > 1) {
+        killJob(stoi(args[1]));
+        return;
+    }
+    else if (command == "run" && args.size() > 1) {
+        string cmd;
+        for (size_t i = 1; i < args.size(); ++i) {
+            cmd += args[i] + " ";
+        }
+        launchBackgroundProcess(cmd);
+        return;
+    }
+    else if (command == "ping" && args.size() > 1) {
+        runPingCommand(args[1]);
+        return;
+    }
+    else if (command == "schedule" && args.size() > 3 && args[args.size()-2] == "at") {
+        string cmd;
+        for (size_t i = 1; i < args.size() - 2; ++i) {
+            cmd += args[i] + " ";
+        }
+        int delay = stoi(args.back());
+        scheduleCommand(cmd, delay);
+        return;
+    }
+    else if (command == "note") {
+        if (args.size() > 2 && args[1] == "add") {
+            string note;
+            for (size_t i = 2; i < args.size(); ++i) {
+                note += args[i] + " ";
+            }
+            addNote(note);
+        }
+        else if (args.size() > 1 && args[1] == "view") {
+            viewNotes();
+        }
+        return;
+    }
+    else if (command == "lock") {
+        lockShell();
+        return;
+    }
+    else if (command == "count") {
+        cout << "[DEBUG] Entered 'count' handler\n";
+        if (args.size() < 3) {
+            cerr << "Usage: count <filename> <word>" << endl;
+            cerr << "Example: count myfile.txt hello" << endl;
+        } else {
+            count_word_in_file(args[1], args[2]);
+        }
+        return;
+    }
+    else if (command == "wordfreq") {
+        if (args.size() < 2) {
+            cerr << "Usage: wordfreq <filename>" << endl;
+            cerr << "Example: wordfreq myfile.txt" << endl;
+        } else {
+            word_frequency(args[1]);
+        }
+        return;
+    }
+    else if (command == "calc") {
+        if (args.size() < 4) {
+            cerr << "Usage: calc <num1> <operator> <num2>" << endl;
+            cerr << "Example: calc 10 + 5" << endl;
+            cerr << "Operators: +, -, *, /, %, ^ (or **)" << endl;
+        } else {
+            calculator(args[1], args[2], args[3]);
+        }
+        return;
+    }
+    else if (command == "cd") {
+        if (args.size() < 2) {
+            char current_dir[MAX_PATH];
+            if (GetCurrentDirectoryA(MAX_PATH, current_dir)) {
+                cout << current_dir << endl;
+            }
+        } else {
+            if (_chdir(args[1].c_str()) != 0) {
+                cerr << "Error changing directory" << endl;
+            }
+        }
+        return;
+    }
+    else if (command == "hatao") {
+        if (args.size() < 2) {
+            cerr << "Error: hatao requires a filename" << endl;
+        } else {
+            if (remove(args[1].c_str()) == 0) {
+                cout << "File deleted successfully (via hatao)" << endl;
+            } else {
+                cerr << "Error deleting file (via hatao)" << endl;
+            }
+        }
+        return;
+    }
+    else if (command == "banao") {
+        if (args.size() < 2) {
+            cerr << "Error: banao requires a filename" << endl;
+        } else {
+            ofstream file(args[1], ios::app);
+            if (file) {
+                file.close();
+                cout << "File created/updated successfully (via banao)" << endl;
+            } else {
+                cerr << "Error creating/updating file (via banao)" << endl;
+            }
+        }
+        return;
+    }
+    else if (command == "dikhhao") {
+        if (args.size() < 2) {
+            cerr << "Error: dikhhao requires a filename" << endl;
+        } else {
+            ifstream file(args[1]);
+            if (file) {
+                string line;
+                while (getline(file, line)) {
+                    cout << line << endl;
+                }
+                file.close();
+            } else {
+                cerr << "Error reading file (via dikhhao)" << endl;
+            }
+        }
+        return;
+    }
+    else if (command == "badlo") {
+        if (args.size() < 3) {
+            cerr << "Error: badlo requires source and destination filenames" << endl;
+        } else {
+            if (rename(args[1].c_str(), args[2].c_str()) == 0) {
+                cout << "File renamed from '" << args[1] << "' to '" << args[2] << "' (via badlo)" << endl;
+            } else {
+                cerr << "Error renaming file (via badlo)" << endl;
+            }
+        }
+        return;
+    }
+    else if (command == "clear") {
+        system("cls");
+        return;
+    }
+    else if (command == "pwd") {
+        char cwd[1024];
+        if (_getcwd(cwd, sizeof(cwd))) {
+            cout << cwd << endl;
+        }
+        return;
+    }
+    else if (command == "history") {
+        cout << "Command history (last 10 commands):\n";
+        int start = (command_history.size() > 10) ? command_history.size() - 10 : 0;
+        for (size_t i = start; i < command_history.size(); i++) {
+            cout << "  " << i + 1 << ": " << command_history[i] << endl;
+        }
+        return;
+    }
+    else if (command == "help") {
+        print_help();
+        return;
+    }
+    else if (command == "ls" || command == "ll") {
+        string path = (args.size() > 1) ? args[1] : ".";
+        bool long_format = (command == "ll");
+
+        wstring wpath;
+        if (path.back() != '\\' && path.back() != '/') {
+            wpath = wstring(path.begin(), path.end()) + L"\\*";
+        } else {
+            wpath = wstring(path.begin(), path.end()) + L"*";
+        }
+
+        WIN32_FIND_DATAW findFileData;
+        HANDLE hFind = FindFirstFileW(wpath.c_str(), &findFileData);
+
+        if (hFind == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            if (err != ERROR_FILE_NOT_FOUND) {
+                cerr << "Error: Cannot access directory (code " << err << ").\n";
+            }
+            return;
+        }
+
+        do {
+            string filename = wide_to_narrow(findFileData.cFileName);
+            if (filename == "." || filename == "..") continue;
+
+            if (long_format) {
+                cout << ((findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "[D] " : "[F] ");
+                cout << setw(30) << left << filename;
+                
+                if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    cout << " " << setw(10) << right 
+                         << (findFileData.nFileSizeLow / 1024) << " KB";
+                }
+                cout << endl;
+            } else {
+                cout << filename << "  ";
+            }
+        } while (FindNextFileW(hFind, &findFileData) != 0);
+
+        FindClose(hFind);
+        if (!long_format) cout << endl;
+        return;
+    }
+    else if (command == "mkdir") {
+        if (args.size() < 2) {
+            cerr << "Error: mkdir requires a directory name.\n";
+        } else {
+            if (_mkdir(args[1].c_str()) == 0) {
+                cout << "Directory '" << args[1] << "' created successfully.\n";
+            } else {
+                cerr << "Error: Could not create directory '" << args[1] << "'.\n";
+                if (errno == EEXIST) {
+                    cerr << "Directory already exists.\n";
+                }
+            }
+        }
+        return;
+    }
+    else if (command == "touch") {
+        if (args.size() < 2) {
+            cerr << "Error: touch requires a filename.\n";
+        } else {
+            ofstream file(args[1], ios::app);
+            if (file) {
+                file.close();
+                cout << "File '" << args[1] << "' created/updated successfully.\n";
+            } else {
+                cerr << "Error: Failed to create or modify file '" << args[1] << "'.\n";
+            }
+        }
+        return;
+    }
+    else if (command == "rm") {
+        if (args.size() < 2) {
+            cerr << "Error: rm requires a filename.\n";
+        } else {
+            if (remove(args[1].c_str()) == 0) {
+                cout << "File '" << args[1] << "' deleted successfully.\n";
+            } else {
+                cerr << "Error: Could not delete file '" << args[1] << "'.\n";
+                if (errno == ENOENT) {
+                    cerr << "File does not exist.\n";
+                }
+            }
+        }
+        return;
+    }
+    else if (command == "cat") {
+        if (args.size() < 2) {
+            cerr << "Error: cat requires a filename.\n";
+        } else {
+            ifstream file(args[1]);
+            if (!file) {
+                cerr << "Error: Cannot open file '" << args[1] << "'.\n";
+            } else {
+                string line;
+                while (getline(file, line)) {
+                    cout << line << endl;
+                }
+                file.close();
+            }
+        }
+        return;
+    }
+    else if (command == "cp") {
+        if (args.size() < 3) {
+            cerr << "Error: cp requires source and destination filenames.\n";
+        } else {
+            ifstream src(args[1], ios::binary);
+            ofstream dst(args[2], ios::binary);
+            if (!src || !dst) {
+                cerr << "Error: Could not copy file.\n";
+            } else {
+                dst << src.rdbuf();
+                cout << "File copied from '" << args[1] << "' to '" << args[2] << "'.\n";
+            }
+        }
+        return;
+    }
+    else if (command == "mv") {
+        if (args.size() < 3) {
+            cerr << "Error: mv requires source and destination filenames.\n";
+        } else {
+            if (rename(args[1].c_str(), args[2].c_str()) == 0) {
+                cout << "File moved from '" << args[1] << "' to '" << args[2] << "'.\n";
+            } else {
+                cerr << "Error: Could not move file.\n";
+            }
+        }
+        return;
+    }
+    else if (command == "time") {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        printf("Current time: %02d:%02d:%02d\n", st.wHour, st.wMinute, st.wSecond);
+        return;
+    }
+    else {
+        string cmd;
+        for (const auto& arg : args) cmd += arg + " ";
+
+        if (cmd.find(".exe") != string::npos || command == "notepad" || command == "calc") {
+            system(("start \"\" " + cmd).c_str());
+        } else {
+            system(cmd.c_str());
+        }
+    }
+}
+
 int main() {
+    string input;
+    vector<string> args;
+
     init_signals();
 
     if (!authenticateShell()) {
@@ -662,44 +956,49 @@ int main() {
         return 1;
     }
 
+    cout << "Custom Shell (type 'help' for commands)\n";
+
     while (true) {
-        cout << "\nShell> ";
-        string input = get_input_with_features();
+        char cwd[MAX_PATH];
+        if (_getcwd(cwd, MAX_PATH)) {
+            cout << "\n" << cwd << " ";
+        }
 
+        input = get_input_with_features();
+        if (input.empty()) continue;
         if (input == "exit") break;
-        
-        vector<string> args;
-        istringstream iss(input);
-        string arg;
-        while (iss >> arg) {
-            args.push_back(arg);
+
+        // Check for pipe or redirection
+        if (input.find('|') != string::npos) {
+            runPipedCommand(input);
+            continue;
+        }
+        if (input.find('>') != string::npos || input.find('<') != string::npos) {
+            runWithRedirection(input);
+            continue;
         }
 
-        if (!args.empty()) {
-            if (args[0] == "jobs") listJobs();
-            else if (args[0] == "fg" && args.size() > 1) fg(stoi(args[1]));
-            else if (args[0] == "kill" && args.size() > 1) killJob(stoi(args[1]));
-            else if (args[0] == "run" && args.size() > 1) {
-                string cmd = input.substr(4);
-                launchBackgroundProcess(cmd);
+        args.clear();
+        bool in_quotes = false;
+        string current;
+        for (char c : input) {
+            if (c == '"') {
+                in_quotes = !in_quotes;
+                continue;
             }
-            else if (args[0] == "ping" && args.size() > 1) runPingCommand(args[1]);
-            else if (args[0] == "schedule" && args.size() > 3 && args[args.size()-2] == "at") {
-                string cmd = input.substr(9, input.find(" at ") - 9);
-                int delay = stoi(args.back());
-                scheduleCommand(cmd, delay);
-            }
-            else if (args[0] == "note") {
-                if (args.size() > 2 && args[1] == "add") {
-                    string note = input.substr(9);
-                    addNote(note);
+            if (isspace(c) && !in_quotes) {
+                if (!current.empty()) {
+                    args.push_back(current);
+                    current.clear();
                 }
-                else if (args.size() > 1 && args[1] == "view") viewNotes();
+            } else {
+                current += c;
             }
-            else if (args[0] == "lock") lockShell();
-            else execute_command(args);
         }
+        if (!current.empty()) args.push_back(current);
+
+        execute_command(args);
     }
 
     return 0;
-}
+} 
